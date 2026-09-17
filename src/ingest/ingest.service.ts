@@ -52,6 +52,18 @@ export class IngestService {
           algorithms: [{ name: 'hnsw-algo', kind: 'hnsw' }],
           profiles: [{ name: 'my-vector-profile', algorithmConfigurationName: 'hnsw-algo' }],
         },
+        //Semantic ranking configuration
+
+        semanticSearch: {
+          configurations: [
+            {
+              name: 'default-semantic-config',
+              prioritizedFields: {
+                contentFields: [{ name: 'content' }],
+              },
+            },
+          ],
+        },
       });
     }
   }

@@ -1,114 +1,249 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Enterprise RAG & Agentic Tool Engine
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A production-ready NestJS application demonstrating enterprise Retrieval-Augmented Generation (RAG) and dynamic tool execution powered by Azure OpenAI and Azure AI Search.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+Built with a two-stage hybrid search pipeline (HNSW Vector + BM25 Lexical + L2 Semantic Reranking), a bounded agentic execution loop, and deterministic prompt guardrails.
 
-## Description
+---
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Architecture Overview
 
-## Project setup
-
-```bash
-$ npm install
+```
+                    ┌──────────────────────────────────────────┐
+                    │              Azure AI Search             │
+                    │  ┌────────────────┐  ┌─────────────────┐ │
+                    │  │ HNSW Vector    │  │  BM25 Lexical   │ │
+                    │  │ Index          │  │  Search         │ │
+                    │  └────────┬────────  └────────┬────────┘ │
+                    │           └── Reciprocal Rank ┘          │
+                    │                Fusion (RRF)              │
+                    │                     │                    │
+                    │        ┌────────────▼────────────┐       │
+                    │        │  L2 Semantic Reranker   │       │
+                    │        │  (top 50 candidates)    │       │
+                    │        └────────────┬────────────┘       │
+                    │        rerankerScore >= 1.8 filter       │
+                    └─────────────────────┬────────────────────┘
+                                           │ Retrieved Context
+                                           ▼
+┌────────────┐   User Query   ┌───────────────────────────┐
+│ Client/API │ ─────────────► │   NestJS AgentService     │
+└────────────┘                └─────────────┬─────────────┘
+      ▲                                     │ Context + Tool Schema
+      │                                     ▼
+      │                       ┌──────────────────────────┐
+      │  Final Answer         │       Azure OpenAI       │
+      └───────────────────────┤    (gpt-4o / gpt-4-turbo)│
+                              └─────────────┬────────────┘
+                                             │ Tool Call (lookupOrder)
+                                             ▼
+                               ┌───────────────────────────┐
+                               │   Local Tool Executor     │
+                               │  (executeOrderLookup)     │
+                               └───────────────────────────┘
 ```
 
-## Compile and run the project
+---
 
-```bash
-# development
-$ npm run start
+## Key Technical Features
 
-# watch mode
-$ npm run start:dev
+### 1. Two-Stage Retrieval Pipeline
+* **Hybrid Recall Stage:** HNSW dense vector search (`kNearestNeighborsCount: 50`) runs alongside BM25 full-text lexical search, fused automatically via Reciprocal Rank Fusion (RRF) — a single `search()` call with both `userQuery` text and `vectorSearchOptions` set triggers this.
+* **L2 Deep-Learning Reranker:** The top 50 fused candidates are re-scored using Azure AI Search's Semantic Ranker (`queryType: 'semantic'`) for contextual relevance.
+* **Calibrated Relevance Thresholding:** Chunks below a `rerankerScore` of `1.8` (0–4 scale) are discarded before prompt construction, filtering low-confidence noise. This threshold is defined as `MIN_RERANKER_SCORE` in `agent.service.ts` and should be tuned against real query logs, not assumed.
 
-# production mode
-$ npm run start:prod
+### 2. Grounded Agentic Engine & Bounded Loop
+* **Bounded Tool Execution:** A `while` loop caps tool-calling rounds at `MAX_TOOL_ITERATIONS` (default 3, set in `agent.service.ts`), preventing runaway execution.
+* **Fallback Safety:** On the final allowed iteration, the `tools` schema is omitted from the request, forcing the model to return a plain-text final answer instead of requesting another tool call.
+* **Defensive Tool Execution:** Tool-call arguments are parsed inside a try/catch; malformed or missing arguments produce a structured error message fed back to the model (not a thrown exception), so the model can recover — e.g. by asking the user to clarify — instead of the request failing outright.
+* **Deterministic Guardrails:** The system prompt explicitly separates passive knowledge retrieval (RAG) from active state operations (function tools), instructing the model to call `lookupOrder` for any real-time/transactional query rather than trusting static document context.
+
+---
+
+## Project Structure
+
+```
+src/
+├── agent/
+│   ├── agent.module.ts          # NestJS Agent Feature Module
+│   └── agent.service.ts         # RAG pipeline, tool orchestration, agent loop
+├── azure/
+│   ├── azure-openai.provider.ts # OpenAI client provider
+│   └── azure-search.provider.ts # Azure AI Search client provider
+├── ingest/
+│   ├── ingest.module.ts         # Ingestion Module
+│   └── ingest.service.ts        # Index creation with Semantic Configuration
+├── tools/
+│   └── order-lookup.tool.ts     # Function schema & execution logic (defines `lookupOrder`)
+└── main.ts                      # Application bootstrap
 ```
 
-## Run tests
+---
 
-```bash
-# unit tests
-$ npm run test
+## Environment Configuration
 
-# e2e tests
-$ npm run test:e2e
+Create a `.env` file in the project root:
 
-# test coverage
-$ npm run test:cov
+```
+AZURE_OPENAI_ENDPOINT=https://<your-openai-instance>.openai.azure.com/
+AZURE_OPENAI_API_KEY=<your-azure-openai-key>
+AZURE_OPENAI_CHAT_DEPLOYMENT=gpt-4o
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small
+
+AZURE_SEARCH_ENDPOINT=https://<your-search-instance>.search.windows.net
+AZURE_SEARCH_API_KEY=<your-azure-search-key>
+AZURE_SEARCH_INDEX_NAME=enterprise-knowledge-index
 ```
 
-## Deployment
+---
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## Getting Started
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### Prerequisites
+* Node.js: >= 18.x
+* Azure Subscriptions:
+  * Azure OpenAI Resource (chat + embedding deployments)
+  * Azure AI Search Resource (**Basic tier or higher** — required for Semantic Ranker; verify current tier requirements against Azure docs before deploying, as these change over time)
+
+### Installation
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+git clone https://github.com/your-org/azure-rag-agent-nestjs.git
+cd azure-rag-agent-nestjs
+npm install
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### Running the Application
 
-## Observability
+```bash
+# Development mode
+npm run start:dev
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+# Production build
+npm run build
+npm run start:prod
+```
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+---
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+## Core Components
 
-## Resources
+### 1. Azure AI Search Index Schema (`src/ingest/ingest.service.ts`)
 
-Check out a few resources that may come in handy when working with NestJS:
+Configures the vector HNSW algorithm profile, standard Lucene analyzer, and semantic field prioritization:
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```typescript
+await this.indexClient.createIndex({
+  name: indexName,
+  fields: [
+    { name: 'id', type: 'Edm.String', key: true, searchable: false },
+    { name: 'content', type: 'Edm.String', searchable: true, analyzerName: 'standard.lucene' },
+    { name: 'source', type: 'Edm.String', searchable: true, filterable: true },
+    {
+      name: 'contentVector',
+      type: 'Collection(Edm.Single)',
+      searchable: true,
+      vectorSearchDimensions: 1536,
+      vectorSearchProfileName: 'my-vector-profile',
+    },
+  ],
+  vectorSearch: {
+    algorithms: [{ name: 'hnsw-algo', kind: 'hnsw' }],
+    profiles: [{ name: 'my-vector-profile', algorithmConfigurationName: 'hnsw-algo' }],
+  },
+  semanticSearch: {
+    configurations: [
+      {
+        name: 'default-semantic-config',
+        prioritizedFields: {
+          contentFields: [{ fieldName: 'content' }],
+        },
+      },
+    ],
+  },
+});
+```
 
-## Support
+### 2. Retrieval & Reranking (`src/agent/agent.service.ts`)
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+Hybrid search with candidate expansion (`kNearestNeighborsCount: 50`), L2 semantic reranking, and score-based filtering:
 
-## Stay in touch
+```typescript
+const MIN_RERANKER_SCORE = 1.8; // tune against real query logs before deploying
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+const searchResults = await this.searchClient.search(userQuery, {
+  vectorSearchOptions: {
+    queries: [{ kind: 'vector', vector: queryVector, kNearestNeighborsCount: 50, fields: ['contentVector'] }],
+  },
+  queryType: 'semantic',
+  semanticSearchOptions: {
+    configurationName: 'default-semantic-config',
+  },
+  top: 3,
+});
+
+let retrievedContext = '';
+let resultCount = 0;
+
+for await (const result of searchResults.results) {
+  const relevanceScore = result.rerankerScore ?? result.score ?? 0;
+  if (relevanceScore >= MIN_RERANKER_SCORE) {
+    retrievedContext += `[Source: ${result.document.source} (Score: ${relevanceScore.toFixed(2)})]\n${result.document.content}\n\n`;
+    resultCount++;
+  }
+}
+
+if (resultCount === 0) {
+  retrievedContext = 'No relevant documents were found for this query.';
+}
+```
+
+### 3. Agent Execution Loop (`src/agent/agent.service.ts`)
+
+Multi-turn tool calling with a hard iteration cap and defensive argument parsing:
+
+```typescript
+const MAX_TOOL_ITERATIONS = 3;
+let iterations = 0;
+
+while (responseMessage.tool_calls && responseMessage.tool_calls.length > 0 && iterations < MAX_TOOL_ITERATIONS) {
+  iterations++;
+  messages.push(responseMessage);
+
+  for (const toolCall of responseMessage.tool_calls) {
+    if (toolCall.type === 'function' && toolCall.function.name === 'lookupOrder') {
+      let toolResult: string;
+
+      try {
+        const args = JSON.parse(toolCall.function.arguments);
+        toolResult = executeOrderLookup(args.orderId);
+      } catch (err) {
+        toolResult = JSON.stringify({
+          error: 'Invalid or missing orderId. Please ask the user to confirm their order number.',
+        });
+      }
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        content: toolResult,
+      });
+    }
+  }
+
+  response = await this.openAiClient.chat.completions.create({
+    model: chatDeployment,
+    messages,
+    tools: iterations < MAX_TOOL_ITERATIONS ? [ORDER_LOOKUP_TOOL_SCHEMA as any] : undefined,
+    tool_choice: iterations < MAX_TOOL_ITERATIONS ? 'auto' : undefined,
+  });
+
+  responseMessage = response.choices[0].message;
+}
+```
+
+---
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Distributed under the MIT License.
