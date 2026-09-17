@@ -108,7 +108,7 @@ AZURE_SEARCH_INDEX_NAME=enterprise-knowledge-index
 ### Installation
 
 ```bash
-git clone https://github.com/your-org/azure-rag-agent-nestjs.git
+git clone https://github.com/mohamedlaajimi123/azure-rag-agent-nestjs.git
 cd azure-rag-agent-nestjs
 npm install
 ```
