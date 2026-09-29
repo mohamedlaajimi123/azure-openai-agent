@@ -1,8 +1,14 @@
-# Enterprise RAG & Agentic Tool Engine
+# Enterprise RAG & Agentic Tool Engine (Prototype — Untested Against Live Azure Services)
 
-A production-ready NestJS application demonstrating enterprise Retrieval-Augmented Generation (RAG) and dynamic tool execution powered by Azure OpenAI and Azure AI Search.
+A NestJS application designed to demonstrate Retrieval-Augmented Generation (RAG) and dynamic tool execution using Azure OpenAI and Azure AI Search.
 
-Built with a two-stage hybrid search pipeline (HNSW Vector + BM25 Lexical + L2 Semantic Reranking), a bounded agentic execution loop, and deterministic prompt guardrails.
+Designed around a two-stage hybrid search pipeline (HNSW Vector + BM25 Lexical + L2 Semantic Reranking), a bounded agentic execution loop, and deterministic prompt guardrails. **This code has not yet been run against live Azure resources — see Status below.**
+
+---
+
+## Status
+
+This project is at the design/implementation stage. The code below reflects the intended architecture, written against the documented Azure SDK API surface, but **has not yet been executed against a real Azure OpenAI or Azure AI Search deployment.** Field names, request shapes, and threshold values (e.g. `MIN_RERANKER_SCORE`, `MAX_TOOL_ITERATIONS`) are based on documentation and reasoning, not on observed behavior, and should be expected to need correction once tested against live services.
 
 ---
 
@@ -24,8 +30,8 @@ Built with a two-stage hybrid search pipeline (HNSW Vector + BM25 Lexical + L2 S
                     │        └────────────┬────────────┘       │
                     │        rerankerScore >= 1.8 filter       │
                     └─────────────────────┬────────────────────┘
-                                           │ Retrieved Context
-                                           ▼
+                                          │ Retrieved Context
+                                          ▼
 ┌────────────┐   User Query   ┌───────────────────────────┐
 │ Client/API │ ─────────────► │   NestJS AgentService     │
 └────────────┘                └─────────────┬─────────────┘
@@ -35,8 +41,8 @@ Built with a two-stage hybrid search pipeline (HNSW Vector + BM25 Lexical + L2 S
       │  Final Answer         │       Azure OpenAI       │
       └───────────────────────┤    (gpt-4o / gpt-4-turbo)│
                               └─────────────┬────────────┘
-                                             │ Tool Call (lookupOrder)
-                                             ▼
+                                            │ Tool Call (lookupOrder)
+                                            ▼
                                ┌───────────────────────────┐
                                │   Local Tool Executor     │
                                │  (executeOrderLookup)     │
@@ -45,18 +51,18 @@ Built with a two-stage hybrid search pipeline (HNSW Vector + BM25 Lexical + L2 S
 
 ---
 
-## Key Technical Features
+## Intended Technical Features
 
-### 1. Two-Stage Retrieval Pipeline
-* **Hybrid Recall Stage:** HNSW dense vector search (`kNearestNeighborsCount: 50`) runs alongside BM25 full-text lexical search, fused automatically via Reciprocal Rank Fusion (RRF) — a single `search()` call with both `userQuery` text and `vectorSearchOptions` set triggers this.
-* **L2 Deep-Learning Reranker:** The top 50 fused candidates are re-scored using Azure AI Search's Semantic Ranker (`queryType: 'semantic'`) for contextual relevance.
-* **Calibrated Relevance Thresholding:** Chunks below a `rerankerScore` of `1.8` (0–4 scale) are discarded before prompt construction, filtering low-confidence noise. This threshold is defined as `MIN_RERANKER_SCORE` in `agent.service.ts` and should be tuned against real query logs, not assumed.
+### 1. Two-Stage Retrieval Pipeline (Design)
+* **Hybrid Recall Stage:** HNSW dense vector search (`kNearestNeighborsCount: 50`) alongside BM25 full-text lexical search, intended to fuse automatically via Reciprocal Rank Fusion (RRF) — per Azure AI Search's documented behavior when both `userQuery` text and `vectorSearchOptions` are set in a single `search()` call.
+* **L2 Semantic Reranker:** Top 50 fused candidates intended to be re-scored using Azure AI Search's Semantic Ranker (`queryType: 'semantic'`).
+* **Relevance Thresholding (unvalidated):** Chunks below a `rerankerScore` of `1.8` (0–4 scale) are intended to be discarded before prompt construction. This value is a starting assumption, not a tuned or observed threshold — it needs validation against real query results.
 
-### 2. Grounded Agentic Engine & Bounded Loop
-* **Bounded Tool Execution:** A `while` loop caps tool-calling rounds at `MAX_TOOL_ITERATIONS` (default 3, set in `agent.service.ts`), preventing runaway execution.
-* **Fallback Safety:** On the final allowed iteration, the `tools` schema is omitted from the request, forcing the model to return a plain-text final answer instead of requesting another tool call.
-* **Defensive Tool Execution:** Tool-call arguments are parsed inside a try/catch; malformed or missing arguments produce a structured error message fed back to the model (not a thrown exception), so the model can recover — e.g. by asking the user to clarify — instead of the request failing outright.
-* **Deterministic Guardrails:** The system prompt explicitly separates passive knowledge retrieval (RAG) from active state operations (function tools), instructing the model to call `lookupOrder` for any real-time/transactional query rather than trusting static document context.
+### 2. Agentic Engine & Bounded Loop (Design)
+* **Bounded Tool Execution:** A `while` loop intended to cap tool-calling rounds at `MAX_TOOL_ITERATIONS` (default 3), to prevent runaway execution.
+* **Fallback Safety:** On the final allowed iteration, the `tools` schema is omitted from the request, intended to force the model into a plain-text final answer.
+* **Defensive Tool Execution:** Tool-call arguments are parsed inside a try/catch; malformed arguments are intended to produce a structured error fed back to the model rather than a thrown exception — this logic is covered by unit tests with mocked Azure clients, but not yet verified against real API responses, which may have different shapes than assumed.
+* **Deterministic Guardrails:** The system prompt is written to separate passive knowledge retrieval (RAG) from active state operations (function tools), instructing the model to call `lookupOrder` for any real-time/transactional query rather than trusting static document context.
 
 ---
 
@@ -169,7 +175,7 @@ await this.indexClient.createIndex({
 Hybrid search with candidate expansion (`kNearestNeighborsCount: 50`), L2 semantic reranking, and score-based filtering:
 
 ```typescript
-const MIN_RERANKER_SCORE = 1.8; // tune against real query logs before deploying
+const MIN_RERANKER_SCORE = 1.8; // unvalidated — tune against real query logs before deploying
 
 const searchResults = await this.searchClient.search(userQuery, {
   vectorSearchOptions: {
@@ -241,6 +247,22 @@ while (responseMessage.tool_calls && responseMessage.tool_calls.length > 0 && it
   responseMessage = response.choices[0].message;
 }
 ```
+
+---
+
+## Testing
+
+Unit tests exist for the tool-execution and argument-parsing logic using mocked Azure OpenAI/Search clients. **These verify the code behaves correctly against assumed response shapes — they do not confirm the assumed shapes match the real Azure SDK's actual behavior.** Integration testing against live Azure resources is the next step before any of the above can be called verified.
+
+---
+
+## Next Steps
+
+- Provision live Azure OpenAI and Azure AI Search resources
+- Run the ingestion pipeline against real documents and confirm the index schema is accepted
+- Run real queries and validate `rerankerScore` values actually fall in a useful range around the assumed `1.8` threshold
+- Confirm the tool-calling loop behaves correctly against real (not mocked) OpenAI responses
+- Update this README to remove "prototype/untested" framing once the above is confirmed
 
 ---
 
