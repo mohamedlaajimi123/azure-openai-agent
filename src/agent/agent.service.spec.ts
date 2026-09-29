@@ -1,46 +1,45 @@
-import { jest } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { Test, TestingModule } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 
-// 1. ES Module Mocking for Tool Implementations
-jest.unstable_mockModule('../tools/order-lookup.tool.js', () => ({
+// 1. Vitest hoists vi.mock automatically, so static imports below get the mocked version
+vi.mock('../tools/order-lookup.tool.js', () => ({
   ORDER_LOOKUP_TOOL_SCHEMA: {
     type: 'function',
     function: { name: 'lookupOrder' },
   },
-  executeOrderLookup: jest.fn().mockImplementation((orderId: string) =>
+  executeOrderLookup: vi.fn().mockImplementation((orderId: string) =>
     JSON.stringify({ orderId, status: 'PROCESSING', tracking: 'TRK-9999' }),
   ),
 }));
 
-// Dynamically import dependencies after setting up module mocks
-const { Test } = await import('@nestjs/testing');
-const { ConfigService } = await import('@nestjs/config');
-const { AgentService } = await import('./agent.service.js');
-const { AZURE_OPENAI_CLIENT } = await import('../azure/azure-openai.provider.js');
-const { AZURE_SEARCH_CLIENT } = await import('../azure/azure-search.provider.js');
-const { executeOrderLookup } = await import('../tools/order-lookup.tool.js');
+// 2. Standard top-level static imports
+import { AgentService } from './agent.service.js';
+import { AZURE_OPENAI_CLIENT } from '../azure/azure-openai.provider.js';
+import { AZURE_SEARCH_CLIENT } from '../azure/azure-search.provider.js';
+import { executeOrderLookup } from '../tools/order-lookup.tool.js';
 
 describe('AgentService', () => {
-  let service: InstanceType<typeof AgentService>;
+  let service: AgentService;
   let mockOpenAiClient: any;
   let mockSearchClient: any;
 
   beforeEach(async () => {
     mockOpenAiClient = {
       embeddings: {
-        create: jest.fn<any>().mockResolvedValue({
+        create: vi.fn().mockResolvedValue({
           data: [{ embedding: [0.1, 0.2, 0.3] }],
         }),
       },
       chat: {
         completions: {
-          create: jest.fn<any>(),
+          create: vi.fn(),
         },
       },
     };
 
-    // Correct Azure SDK shape: Promise resolving to { results: AsyncIterable }
     mockSearchClient = {
-      search: jest.fn<any>().mockResolvedValue({
+      search: vi.fn().mockResolvedValue({
         results: (async function* () {
           yield {
             rerankerScore: 2.5,
@@ -50,7 +49,7 @@ describe('AgentService', () => {
       }),
     };
 
-    const module = await Test.createTestingModule({
+    const module: TestingModule = await Test.createTestingModule({
       providers: [
         AgentService,
         { provide: AZURE_OPENAI_CLIENT, useValue: mockOpenAiClient },
@@ -58,7 +57,7 @@ describe('AgentService', () => {
         {
           provide: ConfigService,
           useValue: {
-            getOrThrow: jest.fn((key: string) => {
+            getOrThrow: vi.fn((key: string) => {
               if (key === 'AZURE_OPENAI_CHAT_DEPLOYMENT') return 'gpt-4o';
               if (key === 'AZURE_OPENAI_EMBEDDING_DEPLOYMENT') return 'text-embedding-3-small';
               return 'mock-value';
@@ -68,11 +67,11 @@ describe('AgentService', () => {
       ],
     }).compile();
 
-    service = module.get<InstanceType<typeof AgentService>>(AgentService);
+    service = module.get<AgentService>(AgentService);
   });
 
   afterEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   // =========================================================================
@@ -110,10 +109,8 @@ describe('AgentService', () => {
 
       const result = await service.chat('Check order status');
 
-      // 1 initial call + 3 loop calls = 4 total calls
       expect(mockOpenAiClient.chat.completions.create).toHaveBeenCalledTimes(4);
 
-      // Verify the final call (4th invocation) receives undefined for tools & tool_choice
       const finalCallArgs = mockOpenAiClient.chat.completions.create.mock.calls[3][0];
       expect(finalCallArgs.tools).toBeUndefined();
       expect(finalCallArgs.tool_choice).toBeUndefined();
